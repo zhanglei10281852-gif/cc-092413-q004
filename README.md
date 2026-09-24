@@ -4,7 +4,7 @@
 
 ## 主要模块
 
-- 震情档案：登记地震事件、震源参数和台站观测，保留计算输入摘要。
+- 震情档案：登记地震事件、台站观测和震源参数版本（草稿/已发布/已撤销的不可变快照），保留计算输入摘要。
 - 科学计算：提供震级、距离和烈度的确定性计算，以及可恢复后台任务。
 - 灾情协同：管理灾情报告、公告、部门责任和跨部门办理状态。
 - 身份与权限：用户、角色、细粒度权限、会话令牌、账号停用和会话撤销。
@@ -60,7 +60,7 @@ curl -sS -X POST http://127.0.0.1:8432/api/auth/bootstrap   -H 'Content-Type: ap
 python -m pytest
 ```
 
-测试覆盖身份初始化、登录、用户与角色维护、权限计算、账号停用后的会话撤销、审计脱敏、事件与台站观测、烈度计算、后台任务去重与领取，以及数据库时间格式。
+测试覆盖身份初始化、登录、用户与角色维护、权限计算、账号停用后的会话撤销、审计脱敏、事件与台站观测、烈度计算、参数版本生命周期与并发冲突、计算结果的输入版本引用，以及后台任务去重与领取和数据库时间格式。
 
 ## 编译检查
 
@@ -75,6 +75,44 @@ python -m app.cli smoke
 ```
 
 该命令在进程内启动应用并检查服务根路径与健康接口，适合部署前快速确认路由和数据库初始化是否正常。
+
+## 震源参数版本管理
+
+同一地震会因新增台站多次修订震级和震源深度。系统为每个事件维护一串**不可变参数快照**（`seismic_parameter_versions`），每次修订都记录参数全文、内容哈希、变更原因、操作者和父版本。版本状态分三种：
+
+- `draft` 草稿：可继续编辑，不影响当前生效结论；每个事件至多一个未发布草稿。
+- `published` 已发布：当前生效版本，每个事件至多一个，发布新版本会自动把旧发布版本置为 `revoked`。
+- `revoked` 已撤销：被新结论取代或被人工撤回的历史快照，永久冻结、保留可查。
+
+典型流程（创建事件即生成 v1 草稿）：
+
+```bash
+# 1. 基于最新版本创建修订草稿（base_version 做乐观并发控制）
+curl -sS -X POST http://127.0.0.1:8432/api/seismic/events/1/parameter-versions \
+  -H 'Content-Type: application/json' \
+  -d '{"magnitude":6.1,"depth_km":15,"reason":"新增3个台站重新定位","base_version":1,"created_by":"analyst-b"}'
+
+# 2. 发布前可用 If-Match: <content_hash> 防止草稿被他人并发改动
+curl -sS -X POST http://127.0.0.1:8432/api/seismic/parameter-versions/2/publish \
+  -H 'Content-Type: application/json' -H 'If-Match: "<content_hash>"' \
+  -d '{"reason":"正式修订","operator":"analyst-b"}'
+
+# 3. 撤回当前生效结论（原因必填）
+curl -sS -X POST http://127.0.0.1:8432/api/seismic/parameter-versions/2/revoke \
+  -H 'Content-Type: application/json' -d '{"reason":"误报撤回","operator":"chief"}'
+```
+
+查询与回放：
+
+- `GET /api/seismic/events/{id}`：返回当前生效参数，附带 `latest_parameter_version`、`current_parameter_version` 和版本数量。
+- `GET /api/seismic/events/{id}?parameter_version=N`：按第 N 版快照回放震级/深度，响应同时给出 `replayed_parameter_version` 与当前生效版本，新旧结论不会混淆。
+- `GET /api/seismic/events/{id}/parameter-versions`（版本清单）、`.../parameter-versions/current`（当前生效）、`.../parameter-versions/{n}`（指定版本）。
+
+并发安全：草稿创建携带 `base_version`，落后于服务端最新版本时返回 `409 conflict` 并给出双方版本号；草稿编辑、发布、撤销可用 `If-Match` 内容哈希做条件更新，冲突一律拒绝（409），不会静默覆盖新数据。
+
+计算任务明确引用输入版本：`POST /api/seismic/events/{id}/computations` 可指定 `parameter_version_id`（缺省引用当前已发布版本），任务记录与计算结果（`parameter_version_info`、`input_digest`）都带版本号、状态和哈希；旧引用版本事后被撤销也不影响已完成结果，便于比较每次修订对烈度和告警阈值的影响。
+
+旧的事件创建/读取接口保持不变；旧的 `PATCH /api/seismic/events/{id}` 仍可使用——直接改参数会自动生成并发布一个版本快照，仅改 `status` 不产生新版本，但存在未发布草稿时会拒绝覆盖。升级前的历史事件在服务启动（`ensure_schema`）时自动补建为 v1 已发布快照。
 
 ## 目录结构
 
