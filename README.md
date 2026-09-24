@@ -96,3 +96,14 @@ tools/             本地维护脚本
 ## 数据一致性
 
 SQLite 连接默认启用外键、WAL、busy timeout 与同步写入策略。需要跨多张表更新的管理操作在即时事务中执行，失败会整体回滚。会话令牌只保存摘要；用户停用会撤销仍有效的会话。审计事件保存操作者、动作、资源、结果和前后状态，但不会保存明文密码或令牌。
+
+### 震源参数版本管理
+
+同一地震会随新增台站反复修订震级与震源深度。为避免值班人员把旧结论当成当前结果，震源参数（震级、震级类型、震源深度）以不可变快照形式保存在 `seismic_event_versions` 中：
+
+- 建档即生成 v1 **已发布（published）**版本；后续修订先创建**草稿（draft）**，显式发布后才生效；发布时旧生效版本自动标记为**已撤销（revoked）**，撤销当前版本会回退到上一版本。
+- 每个快照记录变更原因（`change_reason`）、操作者（`actor`）、基线版本（`base_version`）和时间戳，快照内容永不修改。
+- 乐观并发控制：创建草稿或 PATCH 修改参数时携带 `base_version`，基线落后于最新版本返回 `409 conflict`（含 `latest_version`），不会静默覆盖；不带该字段的旧客户端保持兼容。
+- 计算任务记录引用的 `param_version` 与当时的参数状态（`param_status`），计算始终读取入队时的快照值；入队支持 `param_version` 参数按历史版本回放，相同输入仍按摘要去重。
+- `GET /api/seismic/events/{id}` 返回 `current_param_version`（当前生效版本）与 `latest_param_version`，加 `?at_version=N` 可回放历史参数并同时标注当前生效版本，`replay=true` 提醒该结果不是当前结论。
+- 版本列表与单版本查询：`GET /api/seismic/events/{id}/versions`、`GET /api/seismic/events/{id}/versions/{version}`；发布与撤销：`POST .../versions/{version}/publish|revoke`。

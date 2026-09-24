@@ -20,6 +20,23 @@ class EventPatch(BaseModel):
     magnitude_type: str | None = Field(default=None, min_length=1, max_length=12)
     status: str | None = Field(default=None, pattern="^(draft|review|published|archived)$")
     reason: str = Field(default="", max_length=300)
+    # 乐观锁：客户端读取时携带的参数版本；落后于最新版本时返回 409。
+    base_version: int | None = Field(default=None, ge=1)
+
+
+class ParameterVersionCreate(BaseModel):
+    depth_km: float | None = Field(default=None, ge=0, le=800)
+    magnitude: float | None = Field(default=None, ge=-1, le=10)
+    magnitude_type: str | None = Field(default=None, min_length=1, max_length=12)
+    change_reason: str = Field(..., min_length=1, max_length=300)
+    actor: str = Field(default="operator", min_length=1, max_length=40)
+    # 客户端基于哪个版本修改；缺省视为基于最新版本。
+    base_version: int | None = Field(default=None, ge=1)
+
+
+class VersionAction(BaseModel):
+    actor: str = Field(default="operator", min_length=1, max_length=40)
+    reason: str = Field(default="", max_length=300)
 
 
 class ObservationCreate(BaseModel):
@@ -42,6 +59,8 @@ class ComputeRequest(BaseModel):
     grid_step_km: float = Field(default=10, gt=0, le=100)
     radius_km: float = Field(default=100, gt=0, le=1000)
     requested_by: str = Field(default="system", max_length=80)
+    # 指定按哪个参数版本计算（版本回放）；缺省使用当前生效版本。
+    param_version: int | None = Field(default=None, ge=1)
 
 
 class TaskComplete(BaseModel):
